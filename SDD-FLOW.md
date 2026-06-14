@@ -79,6 +79,7 @@ El pipeline corre en **3 fases estrictas** con `[APPROVAL]` obligatorio entre ca
   - `documentation/api/api_checkout-flow.md` — endpoints, payloads, status codes.
   - `documentation/db/db_checkout-flow.md` — esquemas, tablas, campos, relaciones.
   - `documentation/ui/ui_checkout-flow.md` — jerarquía de componentes, estado, wireframes *(se omite si es backend-only)*.
+  - `documentation/conventions.md` — **convenciones transversales que toda tarea debe respetar**: stack/lenguaje, naming, formato de errores/respuestas, patrones de auth y logging, utilidades compartidas y dónde viven, convenciones de test. Es la única verdad compartida que reciben los agentes en frío además de su porción de arquitectura, así que combate la deriva entre tareas paralelas.
 - Si hay superficie sensible (auth, PII, pagos) invoca además `ai-security-expert` y registra sus restricciones en el contrato correspondiente.
 - Presenta un resumen y **espera tu `[APPROVAL]`**.
 
@@ -119,8 +120,8 @@ Trabaja en **olas (waves)**:
 1. **Escanear y resolver.** Carga todas las tareas; una `pending` se *desbloquea* cuando todos sus `depends_on` están `completed`.
 2. **Armar la ola (sin colisiones).** Del conjunto desbloqueado, selecciona un lote cuyos `file_scope` sean **disjuntos entre sí**. Dos tareas que comparten un archivo van en olas distintas.
 3. **Reclamar.** Marca cada tarea de la ola como `in_progress` + lock antes de despachar (evita doble-toma entre terminales).
-4. **Fan-out en background.** Lanza un subagente por tarea, **en paralelo**. Cada agente recibe un payload mínimo: `id`/`title`/`acceptance_criteria`/`file_scope`, la instrucción de invocar la skill de `"skill"`, y de leer **solo** el `read_architecture_section`. Frontera dura: solo puede tocar archivos dentro de su `file_scope`.
-5. **Esperar y reconciliar.** Cuando un agente termina, valida su reporte contra los `acceptance_criteria`: éxito → `completed` + libera lock; falla → vuelve a `pending` y registra el error.
+4. **Fan-out en background.** Lanza un subagente por tarea, **en paralelo**. Cada agente recibe un payload mínimo: `id`/`title`/`acceptance_criteria`/`file_scope`; la instrucción de **invocar la skill de `"skill"` y demostrarlo** en su reporte (la experticia vive en la skill: hacer el trabajo de forma genérica es una falla, no un atajo); de leer **primero** `documentation/conventions.md` y luego **solo** su `read_architecture_section`. **Frontera dura:** si necesita tocar un archivo fuera de su `file_scope`, debe **ABORTAR y reportarlo**, nunca editarlo. El agente devuelve un **reporte estructurado**: prueba de skill (`skill_invoked` + marcador específico), archivos modificados, cada criterio cumplido sí/no, y el comando de test/lint si aplica.
+5. **Esperar y reconciliar (verificar, no confiar).** Un "listo" auto-reportado no basta. Marca `completed` **solo si pasan todas**: (a) la prueba de skill coincide con `"skill"`; (b) `git diff --name-only` (más untracked) muestra que **todo** path tocado cae dentro del `file_scope`; (c) los archivos declarados existen en el diff; (d) el comando de test/lint, si lo hay, sale con código 0; (e) los `acceptance_criteria` se cumplen objetivamente en el diff. Si algo falla → vuelve a `pending`, libera el lock y registra el motivo en el JSON.
 6. **Loop.** Re-resuelve dependencias (tareas completadas desbloquean otras) y despacha la siguiente ola. Sin purga: el contexto de cada worker murió con su agente.
 
 ### Fase 4 — Quality Gate obligatorio (auto-invocado)
@@ -180,7 +181,8 @@ proyecto/
 ├── documentation/
 │   ├── api/api_checkout-flow.md      # Fase 1
 │   ├── db/db_checkout-flow.md
-│   └── ui/ui_checkout-flow.md
+│   ├── ui/ui_checkout-flow.md
+│   └── conventions.md               # Fase 1 — convenciones transversales (lectura obligatoria de cada agente)
 ├── .sdd/
 │   ├── tasks/
 │   │   ├── task_01.json              # Fase 2
@@ -240,4 +242,5 @@ Emite un único veredicto vinculante: **GO** o **NO-GO**. El pipeline solo está
 2. **Respeta los `[APPROVAL]`.** Son la oportunidad de corregir antes de que el costo suba.
 3. **Lee solo la porción que necesitas.** El `read_architecture_section` existe para ahorrar contexto; no leas toda la arquitectura.
 4. **`file_scope` disjuntos = paralelismo seguro.** Es lo que permite el fan-out de agentes; si dos tareas comparten archivos, serialízalas con `depends_on`.
-5. **No declares el feature terminado sin un GO** de `/sdd-quality-gate`. El pipeline solo cierra con veredicto GO.
+5. **Verificar, no confiar.** Una tarea pasa a `completed` solo cuando la reconciliación lo prueba objetivamente (skill invocada, diff dentro del `file_scope`, tests en verde), no cuando el agente lo afirma.
+6. **No declares el feature terminado sin un GO** de `/sdd-quality-gate`. El pipeline solo cierra con veredicto GO.

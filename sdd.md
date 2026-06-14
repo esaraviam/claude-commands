@@ -26,6 +26,7 @@ Execute the phases strictly in order, waiting for my explicit **[APPROVAL]** bet
    - `documentation/api/api_$ARGUMENTS` — endpoints, request/response payloads, status codes.
    - `documentation/db/db_$ARGUMENTS` — schemas, tables, fields, relationships.
    - `documentation/ui/ui_$ARGUMENTS` — component hierarchy, state rules, wireframe notes (omit if the feature is backend-only).
+   - `documentation/conventions.md` — **cross-cutting conventions every task must obey**: language/stack, naming rules, error/response format, auth & logging patterns, shared utilities and where they live, test conventions. Keep it short and concrete; this is the only shared truth cold agents get besides their own architecture slice. If it already exists from a prior spec, update it instead of overwriting.
    - If a security-sensitive surface exists (auth, PII, payments), also invoke `ai-security-expert` and capture its constraints inside the relevant contract.
 4. Present a summary of the technical design and wait for my **[APPROVAL]** before Phase 2.
 
@@ -62,10 +63,16 @@ Work in **waves**:
 3. **Claim.** For each task in the wave, set `"status": "in_progress"` and stamp a lock (session id / ISO timestamp) before dispatch, so parallel terminals don't double-pick.
 4. **Fan out in background.** Launch one sub-agent per task in the wave **in parallel** (`run_in_background: true`). Each agent's prompt must contain ONLY a tight payload:
    - the task's `id`, `title`, `acceptance_criteria` and `file_scope`;
-   - an instruction to **invoke the skill named in `"skill"`** and apply its rules;
-   - an instruction to **read ONLY** the file + heading in `"read_architecture_section"` — never the full architecture set;
-   - a hard boundary: it may create/modify only files inside its `file_scope`, and must return a short report (files changed + which acceptance criteria it satisfied).
-5. **Await & reconcile.** As each agent finishes, validate its report against the task's `acceptance_criteria`. On success set `"status": "completed"` and clear the lock; on failure set it back to `"pending"`, clear the lock, and record the agent's error in the task JSON.
+   - an instruction to **invoke the skill named in `"skill"`** and apply its rules — and to **prove it** in the report (see below); the skill is where the expertise lives, so doing the work generically without invoking it is a failure, not a shortcut;
+   - an instruction to **read `documentation/conventions.md` first**, then **read ONLY** the file + heading in `"read_architecture_section"` — never the full architecture set;
+   - a **hard boundary**: it may create/modify only files inside its `file_scope`. If it discovers it needs to touch any file outside that scope, it must **ABORT and report it** — never edit out-of-scope files;
+   - a required **structured report** containing exactly: (a) `skill_invoked: <name>` plus a one-line skill-specific marker proving the skill actually ran (e.g. the rule/checklist it applied); (b) the list of files it created/modified; (c) per acceptance criterion, satisfied yes/no; (d) the test/lint command to validate its work, if any.
+5. **Await & reconcile (verify, don't trust).** A self-reported "done" is not enough. As each agent finishes, mark `"completed"` **only if all** of these pass; otherwise set it back to `"pending"`, clear the lock, and record the failure reason in the task JSON:
+   - **Skill proof:** the report includes `skill_invoked` matching the task's `"skill"` and a plausible skill-specific marker. Missing/generic → reject (the skill likely never ran).
+   - **Scope check:** run `git diff --name-only` (plus untracked) and confirm **every** changed path falls inside the task's `file_scope`. Any out-of-scope file → reject (also flags a potential collision).
+   - **Existence check:** the files the report claims it created/modified actually exist and show in the diff.
+   - **Test check:** if the task or report names a test/lint command, run it; non-zero exit → reject.
+   - **Criteria check:** the task's `acceptance_criteria` are objectively satisfied by the diff, not merely asserted.
 6. **Loop.** Re-resolve dependencies (completed tasks may unblock new ones) and dispatch the next wave. No context purge needed — each worker's context died with its agent.
 
 > **Cross-terminal note:** the lock still lets you also run extra `/sdd_resume` terminals; but in-session background fan-out is now the primary parallelism, not multiple terminals.
