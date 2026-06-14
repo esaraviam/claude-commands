@@ -2,7 +2,7 @@
 
 Guía de operación del pipeline de **Spec-Driven Development (SDD)** implementado con comandos slash de Claude Code (`~/.claude/commands/`) y skills locales (`~/.claude/skills/`).
 
-> El flujo convierte una idea en software siguiendo 4 etapas: **especificar → diseñar → descomponer → ejecutar**, con una compuerta de aprobación humana (`[APPROVAL]`) entre fase y fase.
+> El flujo convierte una idea en software siguiendo 5 etapas: **especificar → diseñar → descomponer → ejecutar → validar**, con una compuerta de aprobación humana (`[APPROVAL]`) entre fase y fase y un **quality gate GO/NO-GO** obligatorio al cierre.
 
 ---
 
@@ -69,7 +69,7 @@ Al terminar, escribe `specs/checkout-flow.md` con esta estructura fija:
 
 > El argumento es **el nombre del archivo dentro de `specs/`**, no la ruta completa. Si lo omites, el comando te preguntará cuál procesar y se detendrá hasta que respondas.
 
-El pipeline corre en **3 fases estrictas**, con `[APPROVAL]` obligatorio entre cada una.
+El pipeline corre en **3 fases estrictas** con `[APPROVAL]` obligatorio entre cada una, más una **Fase 4** de quality gate que se dispara sola al final (sin `[APPROVAL]` previo).
 
 ### Fase 1 — Diseño arquitectónico (`software-architect`)
 
@@ -168,10 +168,11 @@ proyecto/
 │   ├── db/db_checkout-flow.md
 │   └── ui/ui_checkout-flow.md
 ├── .sdd/
-│   └── tasks/
-│       ├── task_01.json              # Fase 2
-│       ├── task_02.json
-│       └── ...
+│   ├── tasks/
+│   │   ├── task_01.json              # Fase 2
+│   │   ├── task_02.json
+│   │   └── ...
+│   └── quality-gate-report.md        # Fase 4 (veredicto GO/NO-GO)
 └── src/ ...                          # Fase 3 (código entregado)
 ```
 
@@ -224,4 +225,4 @@ Emite un único veredicto vinculante: **GO** o **NO-GO**. El pipeline solo está
 2. **Respeta los `[APPROVAL]`.** Son la oportunidad de corregir antes de que el costo suba.
 3. **Lee solo la porción que necesitas.** El `read_architecture_section` existe para ahorrar contexto; no leas toda la arquitectura.
 4. **Purga entre tareas.** Contexto limpio = ejecución más precisa.
-5. **No cierres sin QA + release gate** si el resultado va a producción.
+5. **No declares el feature terminado sin un GO** de `/sdd-quality-gate`. El pipeline solo cierra con veredicto GO.
