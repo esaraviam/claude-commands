@@ -58,7 +58,11 @@ Execute the phases strictly in order, waiting for my explicit **[APPROVAL]** bet
 5. When the deliverable is patched into the repo, set that task's `"status": "completed"` and clear the lock.
 6. **Context purge & loop:** before the next unblocked task, pause and tell me: "Por favor ejecuta `/compact` o `/clear` para limpiar el contexto antes de la siguiente tarea." Once I confirm, loop back to step 1.
 
-When no pending tasks remain, summarize what shipped and suggest running `qa-engineer`, `refactor-auditor`, and `release-manager` as a closing quality + delivery gate.
+### Phase 4 — Mandatory Quality Gate (auto-invoked)
+When no pending tasks remain, the pipeline is **not** done yet. Summarize what shipped, then **automatically run the `/sdd-quality-gate` command** for this spec — do not leave it to the user. That gate verifies completeness and runs `qa-engineer` → `refactor-auditor` → `release-manager` (analysis only), and returns a single **GO / NO-GO** verdict.
+
+- If the gate returns **NO-GO**, route back to the specific task or skill it names (usually via `/sdd_resume`) and re-run the gate. The feature is only complete on **GO**.
+- The gate never mutates git; once it returns GO, the user performs the actual release.
 
 ---
 
