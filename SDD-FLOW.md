@@ -98,6 +98,7 @@ Esquema mínimo de cada tarea:
   "status": "pending",
   "depends_on": [],
   "read_architecture_section": "documentation/db/db_checkout-flow.md#Auth rules",
+  "file_scope": ["src/api/urls/**", "src/db/migrations/003_urls.sql"],
   "acceptance_criteria": ["..."]
 }
 ```
@@ -105,17 +106,22 @@ Esquema mínimo de cada tarea:
 - `depends_on` — IDs que deben estar `completed` antes (p.ej. una tarea de frontend depende del contrato de API).
 - `skill` — qué skill ejecuta la tarea.
 - `read_architecture_section` — **archivo + heading exactos**; el ejecutor lee solo esa porción, no toda la arquitectura (ahorra contexto).
+- `file_scope` — archivos/globs que la tarea puede crear o modificar. Dos tareas corren **en paralelo solo si sus `file_scope` son disjuntos**; esto es lo que permite el fan-out de agentes en la Fase 3. Si dos tareas deben tocar el mismo archivo, dale a una un `depends_on` de la otra en vez de paralelizarlas.
 
 Presenta el grafo completo (IDs, skill, dependencias) y **espera tu `[APPROVAL]`**.
 
-### Fase 3 — Ejecución paralela con locking
+### Fase 3 — Ejecución paralela por fan-out de agentes
 
-1. Escanea `.sdd/tasks/` y carga todas las tareas.
-2. **Resolución de dependencias:** una tarea `pending` se *desbloquea* solo cuando todos sus `depends_on` están `completed`.
-3. **Task locking:** toma la primera tarea desbloqueada sin lock activo, la marca `in_progress` y estampa un lock (session id / timestamp) para reclamarla en esta ventana — evita carreras entre terminales.
-4. Invoca la skill del campo `"skill"`. **Regla crítica de contexto:** lee solo el `read_architecture_section`, nunca toda la arquitectura.
-5. Cuando el entregable queda en el repo, marca la tarea `completed` y libera el lock.
-6. **Purga de contexto:** antes de la siguiente tarea te pedirá ejecutar `/compact` o `/clear`. Confirmas y vuelve al paso 1.
+Aquí `/sdd` deja de implementar y actúa como **coordinador**: no escribe código ni lee la arquitectura, solo despacha cada tarea a un **subagente aislado** (Task tool, `general-purpose`, en background) que corre en su propio contexto y devuelve un resumen. Esto mantiene el contexto del orquestador liviano toda la corrida — **ya no necesitas `/compact` manual entre tareas**.
+
+Trabaja en **olas (waves)**:
+
+1. **Escanear y resolver.** Carga todas las tareas; una `pending` se *desbloquea* cuando todos sus `depends_on` están `completed`.
+2. **Armar la ola (sin colisiones).** Del conjunto desbloqueado, selecciona un lote cuyos `file_scope` sean **disjuntos entre sí**. Dos tareas que comparten un archivo van en olas distintas.
+3. **Reclamar.** Marca cada tarea de la ola como `in_progress` + lock antes de despachar (evita doble-toma entre terminales).
+4. **Fan-out en background.** Lanza un subagente por tarea, **en paralelo**. Cada agente recibe un payload mínimo: `id`/`title`/`acceptance_criteria`/`file_scope`, la instrucción de invocar la skill de `"skill"`, y de leer **solo** el `read_architecture_section`. Frontera dura: solo puede tocar archivos dentro de su `file_scope`.
+5. **Esperar y reconciliar.** Cuando un agente termina, valida su reporte contra los `acceptance_criteria`: éxito → `completed` + libera lock; falla → vuelve a `pending` y registra el error.
+6. **Loop.** Re-resuelve dependencias (tareas completadas desbloquean otras) y despacha la siguiente ola. Sin purga: el contexto de cada worker murió con su agente.
 
 ### Fase 4 — Quality Gate obligatorio (auto-invocado)
 
@@ -136,24 +142,32 @@ Si cerraste la sesión, hiciste `/clear`, o cambiaste de terminal a mitad de la 
 
 - Reconstruye el estado escaneando `.sdd/tasks/*.json`.
 - Detecta el spec activo y localiza sus contratos en `documentation/api|db|ui/`.
-- Imprime una **matriz de estado**: completadas / en progreso (locked) / pendientes, resaltando la **primera tarea desbloqueada**.
-- Pide `[APPROVAL]` y ejecuta esa tarea con contexto aislado (solo su definición + criterios + la porción de arquitectura referenciada).
+- Imprime una **matriz de estado**: completadas / en progreso (locked) / pendientes, resaltando las **tareas desbloqueadas**.
+- Arma una **ola sin colisiones** (`file_scope` disjuntos), pide `[APPROVAL]`, y despacha cada tarea a un subagente aislado en background — igual que la Fase 3.
 
 > No necesita argumentos: el estado vive completo en `.sdd/tasks/`.
 
 ---
 
-## 6. Ciclo de trabajo recomendado (paralelismo real)
+## 6. Paralelismo: cómo se ejecuta de verdad
 
-El locking permite avanzar varias tareas a la vez en **terminales distintas**:
+**Modelo primario — fan-out de agentes en una sola sesión.** En la Fase 3, `/sdd` coordina y lanza un subagente por tarea desbloqueada con `file_scope` disjunto, todos en background a la vez:
 
 ```
-Terminal A: /sdd checkout-flow.md     # corre fases 1–2, arranca fase 3
-Terminal B: /sdd_resume               # toma la siguiente tarea desbloqueada
-Terminal C: /sdd_resume               # toma otra tarea sin dependencias
+/sdd checkout-flow.md
+   └─ Fase 3 (coordinador)
+        ├─ agente → task_02 (backend-coder)   ┐
+        ├─ agente → task_03 (frontend)        ├─ en paralelo, contextos aislados
+        └─ agente → task_04 (ux)              ┘
+        ▼ espera, reconcilia, re-resuelve dependencias → siguiente ola
 ```
 
-Cada terminal estampa su lock, así dos sesiones no pelean por la misma tarea. Entre tareas, ejecuta `/compact` o `/clear` para mantener el contexto limpio.
+Ventajas frente al esquema viejo de terminales:
+- **Contexto del orquestador liviano:** no acumula el trabajo de los workers → sin `/compact` manual.
+- **Aislamiento real:** cada tarea muere con su agente; no hay fugas de contexto entre tareas.
+- **Colisiones imposibles:** la ola exige `file_scope` disjuntos.
+
+**Modelo secundario (opcional) — multi-terminal.** Los locks siguen existiendo, así que aún puedes abrir terminales extra con `/sdd_resume` si quieres más concurrencia que la de una sesión. Cada terminal estampa su lock y no pelea por la misma tarea.
 
 ---
 
@@ -215,7 +229,8 @@ Emite un único veredicto vinculante: **GO** o **NO-GO**. El pipeline solo está
 | No encuentra el spec | Lo corriste fuera de la raíz del proyecto | `cd` a la raíz y vuelve a ejecutar |
 | Una tarea nunca se desbloquea | Dependencia mal puesta en `depends_on` o una tarea quedó `in_progress` colgada | Revisa/edita el JSON en `.sdd/tasks/`; limpia el lock manualmente |
 | El arquitecto intenta escribir código | — | Es comportamiento prohibido por diseño; reitera que la Fase 1 es solo contratos |
-| Se pierde contexto entre tareas | No purgaste | Ejecuta `/compact` o `/clear` cuando el pipeline lo pida, luego `/sdd_resume` |
+| Dos tareas pisan el mismo archivo | `file_scope` solapados puestos en la misma ola | Ajusta los `file_scope` para que sean disjuntos, o añade un `depends_on` entre ellas para serializarlas |
+| Una tarea quedó colgada en `in_progress` | El agente falló sin reconciliar | Vuelve a poner `pending` y limpia el lock en el JSON; `/sdd_resume` la re-despachará |
 
 ---
 
@@ -224,5 +239,5 @@ Emite un único veredicto vinculante: **GO** o **NO-GO**. El pipeline solo está
 1. **Un spec, un pipeline.** No mezcles features en el mismo `.sdd/tasks/`.
 2. **Respeta los `[APPROVAL]`.** Son la oportunidad de corregir antes de que el costo suba.
 3. **Lee solo la porción que necesitas.** El `read_architecture_section` existe para ahorrar contexto; no leas toda la arquitectura.
-4. **Purga entre tareas.** Contexto limpio = ejecución más precisa.
+4. **`file_scope` disjuntos = paralelismo seguro.** Es lo que permite el fan-out de agentes; si dos tareas comparten archivos, serialízalas con `depends_on`.
 5. **No declares el feature terminado sin un GO** de `/sdd-quality-gate`. El pipeline solo cierra con veredicto GO.

@@ -42,21 +42,33 @@ Execute the phases strictly in order, waiting for my explicit **[APPROVAL]** bet
      "status": "pending",
      "depends_on": [],
      "read_architecture_section": "documentation/db/db_$ARGUMENTS#Auth rules",
+     "file_scope": ["src/api/urls/**", "src/db/migrations/003_urls.sql"],
      "acceptance_criteria": ["..."]
    }
    ```
    - **`depends_on`**: IDs of foundational tasks that MUST be `completed` first (e.g. a frontend task depends on the API contract task).
    - **`skill`**: which worker skill should execute it.
    - **`read_architecture_section`**: the exact file **and** heading needed for this task — so the executor reads only that slice, not the whole architecture, to save context.
+   - **`file_scope`**: the files/globs this task is allowed to create or modify. Two tasks may run **in parallel only if their `file_scope` sets are disjoint** — this is what lets Phase 3 fan out safely across background agents. Keep scopes tight and non-overlapping; if two tasks must touch the same file, give one a `depends_on` the other instead.
 4. Present the full task graph (IDs, skill, dependencies) and wait for my **[APPROVAL]**.
 
-### Phase 3 — Parallel Execution via Dependency Check & Task Locking
-1. Scan `.sdd/tasks/` and load every task JSON.
-2. **Dependency resolution:** a `pending` task is *unblocked* only when every ID in its `depends_on` is `completed`.
-3. **Task locking (avoid races across terminals):** pick the first unblocked task with no active lock, set `"status": "in_progress"`, and stamp a lock (session id or ISO timestamp) to claim it for this window.
-4. Invoke the skill named in the task's `"skill"` field. **CRITICAL context rule:** read ONLY the file + heading in `"read_architecture_section"`. Do NOT read the full architecture set.
-5. When the deliverable is patched into the repo, set that task's `"status": "completed"` and clear the lock.
-6. **Context purge & loop:** before the next unblocked task, pause and tell me: "Por favor ejecuta `/compact` o `/clear` para limpiar el contexto antes de la siguiente tarea." Once I confirm, loop back to step 1.
+### Phase 3 — Parallel Execution via Agent Fan-Out
+You are now a **coordinator**: you do NOT implement tasks yourself and you do NOT read the architecture contracts. You dispatch each task to an **isolated sub-agent** (Task tool, `subagent_type: general-purpose`) that runs in its own context and returns only a result summary. This keeps your context lean across the whole run — no manual `/compact` between tasks.
+
+Work in **waves**:
+
+1. **Scan & resolve.** Load every task JSON in `.sdd/tasks/`. A `pending` task is *unblocked* only when every ID in its `depends_on` is `completed`.
+2. **Build the wave (collision-safe).** From the unblocked set, select a batch whose `file_scope` globs are **pairwise disjoint**. Two tasks that share any file go in different waves — never dispatch them together. Tasks with no active lock only.
+3. **Claim.** For each task in the wave, set `"status": "in_progress"` and stamp a lock (session id / ISO timestamp) before dispatch, so parallel terminals don't double-pick.
+4. **Fan out in background.** Launch one sub-agent per task in the wave **in parallel** (`run_in_background: true`). Each agent's prompt must contain ONLY a tight payload:
+   - the task's `id`, `title`, `acceptance_criteria` and `file_scope`;
+   - an instruction to **invoke the skill named in `"skill"`** and apply its rules;
+   - an instruction to **read ONLY** the file + heading in `"read_architecture_section"` — never the full architecture set;
+   - a hard boundary: it may create/modify only files inside its `file_scope`, and must return a short report (files changed + which acceptance criteria it satisfied).
+5. **Await & reconcile.** As each agent finishes, validate its report against the task's `acceptance_criteria`. On success set `"status": "completed"` and clear the lock; on failure set it back to `"pending"`, clear the lock, and record the agent's error in the task JSON.
+6. **Loop.** Re-resolve dependencies (completed tasks may unblock new ones) and dispatch the next wave. No context purge needed — each worker's context died with its agent.
+
+> **Cross-terminal note:** the lock still lets you also run extra `/sdd_resume` terminals; but in-session background fan-out is now the primary parallelism, not multiple terminals.
 
 ### Phase 4 — Mandatory Quality Gate (auto-invoked)
 When no pending tasks remain, the pipeline is **not** done yet. Summarize what shipped, then **automatically run the `/sdd-quality-gate` command** for this spec — do not leave it to the user. That gate verifies completeness and runs `qa-engineer` → `refactor-auditor` → `release-manager` (analysis only), and returns a single **GO / NO-GO** verdict.
