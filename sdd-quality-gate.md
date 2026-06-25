@@ -14,11 +14,18 @@ You are the **SDD Quality Gate** — the mandatory closing checkpoint of the Spe
 - **Gate report (output):** `.sdd/quality-gate-report.md`
 - **Active spec:** taken from `$ARGUMENTS` if provided, otherwise read from the `"spec"` field inside the task files.
 
+## Model Routing Registry (Token Governance)
+*Force these models for sub-agents and tool calls to optimize cost/precision:*
+- **[ARCH_OPUS]** -> `claude-opus-4-8` (QA, Audit, Final Verdict)
+- **[DEV_SONNET]** -> `claude-sonnet-4-6` (State analysis, programatic checks)
+- **[DOC_HAIKU]** -> `claude-haiku-4-5-20251001` (Report generation, changelogs)
+
 Skills live at `.claude/skills/<name>/SKILL.md`. Invoke them by name with the Skill tool.
 
 ---
 
 ## STAGE 0 — Completeness Check (programmatic; blocks everything below)
+*   **Model:** Use **[DEV_SONNET]** for this analysis.
 
 Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immediately and do **not** run the quality skills (no point validating an incomplete pipeline).
 
@@ -30,7 +37,10 @@ Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immedi
    - `documentation/api/api_<spec>` (if any task reads an API section)
    - `documentation/db/db_<spec>` (if any task reads a DB section)
    - `documentation/ui/ui_<spec>` (if any UI task exists)
-6. Verify each task's `read_architecture_section` points to a file + heading that actually exists.
+6. **Architecture Integrity Check (Pointer Validation):**
+   - For each task, verify its `read_architecture_section` points to a file + heading that actually exists.
+   - Use `grep -q "^#.*<heading>"` over the specified file.
+   - Any broken pointer → **NO-GO** ("Broken architecture pointer in <task_id>: <pointer>").
 
 **If any check fails:** emit the Completeness Failure block (see Output), set verdict **NO-GO**, name the exact gap and which step/skill to route back to (usually a specific `/sdd_resume` task), and stop.
 
@@ -39,6 +49,7 @@ Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immedi
 ---
 
 ## STAGE 1 — Functional Quality (`qa-engineer`)
+*   **Model:** Use **[ARCH_OPUS]** for this stage.
 
 1. Invoke `qa-engineer` with the active spec, the implemented code, and the aggregated `acceptance_criteria` from every task.
 2. Capture its verdict: **APPROVED**, **APPROVED-WITH-WARNINGS**, or **REJECTED**, plus the list of failed checks and risks.
@@ -49,6 +60,7 @@ Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immedi
 ---
 
 ## STAGE 2 — Architectural Health (`refactor-auditor`)
+*   **Model:** Use **[ARCH_OPUS]** for this stage.
 
 1. Invoke `refactor-auditor` over the files delivered by the pipeline.
 2. Capture the overall health score (0–10) and the issues, classified as **BLOCKING** (must fix now) vs **ADVISORY** (next iteration).
@@ -57,6 +69,7 @@ Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immedi
 ---
 
 ## STAGE 3 — Release Readiness (`release-manager`, analysis only)
+*   **Model:** Use **[DOC_HAIKU]** for changelog/notes generation; use **[ARCH_OPUS]** for the final "Safe to merge" decision.
 
 1. Invoke `release-manager` in **analysis mode**. It MUST:
    - Decide the SemVer bump (patch / minor / major) with rationale.
@@ -64,6 +77,18 @@ Run this BEFORE invoking any quality skill. If it fails, output **NO-GO** immedi
    - State the merge strategy and "Safe to merge? yes/no".
 2. **Hard constraint:** do NOT create commits, tags, or branches. This stage produces a release *plan*, not a release. The user executes the actual release after the gate returns GO.
 3. `release-manager` must report **not safe** if QA was REJECTED — cross-check this matches Stage 1.
+
+---
+
+## STAGE 4 — Memory Persistence (`system-memory`)
+*   **Model:** Use **[ARCH_OPUS]** to analyze the results and update memory.
+
+1. Invoke `system-memory` to process the outcome of the gate. It **dual-writes**: the git-tracked files stay authoritative, and a mirrored memory is saved to **Engram** (`engram` CLI) for cross-spec semantic recall by future Phase 1 / Phase 2 runs.
+   - **If Verdict is GO:** Update `documentation/SYSTEM_MAP.md` with the new architecture, endpoints, and data models; mirror each decision via `engram save ... --type architecture`.
+   - **If Verdict is NO-GO:** Extract the root cause of the blocking items, update `.sdd/retrospectives.json`, and mirror the lesson via `engram save ... --type retrospective`.
+   - After saving, the skill runs `engram sync --project "$PROJ"` to export the new memories into `.engram/` so they **travel with the repo via git**. The gate still never runs git itself — `.engram/` is left in the working tree for the user's post-GO release commit to include alongside the feature.
+   - If the `engram` binary is unavailable, the skill writes the files only and reports `Engram: unavailable` — this must **not** affect the GO/NO-GO verdict.
+2. Ensure the skill proof `[SKILL-CONFIRMATION: system-memory | ...]` is recorded in the gate report.
 
 ---
 

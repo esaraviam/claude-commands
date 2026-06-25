@@ -83,6 +83,46 @@ El pipeline corre en **3 fases estrictas** con `[APPROVAL]` obligatorio entre ca
 - Si hay superficie sensible (auth, PII, pagos) invoca además `ai-security-expert` y registra sus restricciones en el contrato correspondiente.
 - Presenta un resumen y **espera tu `[APPROVAL]`**.
 
+---
+
+## 5. Optimización de Modelos y Tokens (Enrutamiento Automático)
+
+El pipeline selecciona automáticamente el modelo de Anthropic más eficiente para cada tarea:
+
+| Fase / Tarea | Modelo | Razón |
+| :--- | :--- | :--- |
+| **Génesis de Spec** (`/create-spec`) | `Opus` | Eliminar ambigüedades en la raíz del proyecto. |
+| **Arquitectura** (`Fase 1`) | `Opus` | Razonamiento profundo para diseño de contratos y seguridad. |
+| **Backlog** (`Fase 2`) | `Sonnet` | Precisión técnica para descomponer tareas atómicas. |
+| **Implementación** (`Fase 3`) | `Sonnet` | El estándar para escritura de código y diffs. |
+| **Quality Gate** (`Fase 4`) | `Opus` | Validación crítica vs Spec y Auditoría de código. |
+**Prompt Caching:** Los agentes están instruidos para leer siempre `conventions.md` al inicio de cada tarea. Esto activa el caché de Anthropic, reduciendo el costo de tokens hasta en un 90% en lecturas repetitivas.
+
+---
+
+## 1.6. Capa de Persistencia y Memoria Sistémica (Aprendizaje Continuo)
+
+A diferencia de los flujos genéricos, SDD mantiene una memoria viva del proyecto para evitar la deriva arquitectónica y la repetición de errores:
+
+1.  **SYSTEM_MAP.md (`documentation/`):** Un índice dinámico de archivos, APIs y modelos existentes. La Fase 1 lo consulta para asegurar que el nuevo diseño sea compatible con lo que ya está construido.
+2.  **Retrospectives (`.sdd/retrospectives.json`):** Un registro de por qué fallaron auditorías previas. La Fase 2 inyecta estas "lecciones aprendidas" como criterios de aceptación automáticos en las nuevas tareas.
+3.  **Engram — capa de memoria semántica que viaja con el repo (`engram` CLI):** Backend de memoria persistente por proyecto que **convive** con los archivos anteriores (*dual-write*). Los `.md`/`.json` siguen siendo la verdad versionable en git; Engram añade **búsqueda semántica cross-spec**: en vez de releer el `SYSTEM_MAP.md` completo o todo el `retrospectives.json`, las fases recuperan solo lo relevante.
+    - **Llave de proyecto (importante):** `engram save` **NO** auto-detecta el proyecto — hay que pasar `--project` explícito, y debe ser el **basename del repo** para que coincida con lo que escribe `engram sync`. Todas las fases lo derivan igual: `PROJ="$(basename "$(git rev-parse --show-toplevel)")"`.
+    - **Ciclo que hace viajar la memoria por git:**
+      - **Export (cierre):** la skill `system-memory` (Stage 4) hace `engram save … --project "$PROJ"` y luego `engram sync --project "$PROJ"`, que escribe `.engram/manifest.json` + `.engram/chunks/*.jsonl.gz`. `engram sync` **no toca git**; deja `.engram/` en el working tree y tu **commit de release post-GO lo incluye**. `.engram/` debe **commitearse**, nunca ir al `.gitignore`.
+      - **Import (apertura):** la **Fase 1** y `/sdd_resume` corren `engram sync --import --project "$PROJ"` para cargar en la DB local los chunks que vinieron en el `git pull`, antes de hacer recall. Así la memoria de un compañero (o de otra máquina) está disponible para tu corrida.
+    - **Recall por fase:**
+      - **Fase 1** → `engram search "<dominio>" --type architecture --project "$PROJ"` para traer decisiones de diseño previas que no debe contradecir.
+      - **Fase 2** → `engram search "<dominio>" --type retrospective --project "$PROJ"` para inyectar lecciones de *cualquier* spec previo del proyecto, no solo del actual.
+    - **Taxonomía de tipos:** `architecture` (decisiones / endpoints / modelos, tras GO) y `retrospective` (causa raíz + regla a aplicar, tras NO-GO).
+    - **Bootstrap (Fase 0 de `/sdd`):** al inicio del pipeline, un chequeo programático verifica que `.engram/` **no esté git-ignored** (con `git check-ignore`) y avisa si hay chunks sin commitear (`git add .engram/`). Si está ignorado, ofrece quitar esa línea del `.gitignore`. Es idempotente, silencioso cuando todo está bien, y se omite si `engram` no está instalado. Nunca commitea — solo verifica.
+    - **Requisitos:** correr siempre desde la **raíz del proyecto**. Si el binario `engram` no está instalado, las fases **omiten bootstrap/recall/sync en silencio** y operan solo con los archivos — el pipeline nunca falla por su ausencia. Las llamadas `engram` ya están en el allowlist de `~/.claude/settings.json`.
+4.  **Quality Gate Feedback Loop:** Tras cada ejecución, el Gate (Stage 4) invoca la skill `system-memory` que hace **dual-write + sync**: destila el éxito en `SYSTEM_MAP.md` + `engram save --type architecture`, o el fallo en `retrospectives.json` + `engram save --type retrospective`, y exporta a `.engram/`. Así la memoria de la corrida queda versionada en git y disponible para el recall semántico de futuras specs en cualquier clon del repo.
+
+---
+
+## 2. Requisitos previos
+
 ### Fase 2 — Backlog y grafo de dependencias
 
 - Lee los contratos aprobados.
